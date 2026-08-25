@@ -66,12 +66,13 @@ function uctAmount(client, transfer) {
 
 export async function startAgent(client, signal) {
   const state = State.load();
+  client.attachState(state); // the client keeps the lag-free book balance in state
   const rateLimit = new RateLimiter();
   const sym = client.coin.symbol;
   const selfNorm = new Set([...client.selfPubkeys()].map(normalizeKey));
   const t = config.treasury;
 
-  const balance = await client.spendableWhole();
+  const balance = await client.effectiveSpendableWhole(); // anchors/reconciles the book to chain
   log.info('──────────────────────────────────────────────');
   log.info(' frani-treasury — services starting');
   log.info(`   identity    : ${client.describe()}`);

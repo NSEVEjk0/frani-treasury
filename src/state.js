@@ -72,6 +72,13 @@ function freshState() {
     version: STATE_VERSION,
     serviceIntentId: null,
     paused: false,
+    // Lag-free "book" balance of the spendable corpus (base-unit string, or null
+    // until first anchored). The network reports 0 spendable during a token's
+    // in-flight settle window, so we can't read live balance to gate disbursements;
+    // instead we debit this book the instant we attempt a send and reconcile it to
+    // the on-chain confirmed balance whenever the wallet is quiescent. See
+    // sphere-client.effectiveSpendableBase().
+    bookBalanceBase: null,
     seenDmIds: [],
     seenTransferIds: [],
     handledRequestIds: [],
@@ -157,6 +164,28 @@ export class State {
   }
   setPaused(v) {
     this.data.paused = !!v;
+  }
+
+  // ── book balance (lag-free spendable corpus) ─────────────────────────────────
+  /** Current book balance in base units, or null if not yet anchored. */
+  getBookBase() {
+    return this.data.bookBalanceBase == null ? null : B(this.data.bookBalanceBase);
+  }
+  /** Set the book to an absolute base-unit value (used to anchor/reconcile to chain). */
+  setBookBase(base) {
+    this.data.bookBalanceBase = B(base).toString();
+  }
+  /**
+   * Adjust the book by a signed delta (negative on disburse/refund, positive on
+   * mint/receipt), clamped at zero. No-op while unanchored — the next
+   * reconcile anchors it to the confirmed on-chain balance, which already
+   * reflects reality, so we never guess from a null book.
+   */
+  adjustBook(deltaBase) {
+    if (this.data.bookBalanceBase == null) return;
+    let v = B(this.data.bookBalanceBase) + B(deltaBase);
+    if (v < 0n) v = 0n;
+    this.data.bookBalanceBase = v.toString();
   }
 
   // ── requesters (reputation records) ─────────────────────────────────────────

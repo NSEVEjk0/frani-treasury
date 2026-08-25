@@ -46,7 +46,7 @@ function fmtWhen(ms) {
  */
 export async function buildContext(client, state, rec, now) {
   const decimals = client.coin.decimals;
-  const balanceBase = await client.spendableBase();
+  const balanceBase = await client.effectiveSpendableBase();
   return {
     balanceBase,
     floorBase: client.toBase(config.treasury.minBalanceFloorWhole),
@@ -186,16 +186,28 @@ export async function handleFundingRequest(client, state, rateLimit, { dm, reque
     await reply(client, recipient, rateLimit, `🛑 The treasury is at its reserve floor and can't disburse right now. Please check back later. ${sig()}`, { priority: true });
     return { decision, skipped: 'reserve-floor' };
   }
-  if (res?.unconfirmed) {
-    // Certification unconfirmed: we did NOT retry (double-pay guard). Record nothing financial.
-    log.warn(`Disbursement to ${recipient} unconfirmed — not recorded, not retried.`);
-    await reply(client, recipient, rateLimit, `⚠️ The network didn't confirm the transfer. To avoid double-paying I won't retry automatically — check your wallet shortly, and re-request if nothing arrives. ${sig()}`, { priority: true });
-    return { decision, unconfirmed: true };
-  }
-  if (res?.error) {
-    log.error(`Disbursement to ${recipient} failed: ${res.error}`);
-    await reply(client, recipient, rateLimit, `⚠️ I hit an error and nothing was sent. Please try again shortly. ${sig()}`, { priority: true });
-    return { decision, error: res.error };
+  if (res?.ambiguous) {
+    // The send could not be confirmed end-to-end. Its token burn may already be
+    // certified (funds gone) or it may have failed outright — the network doesn't
+    // tell us, and we must NOT retry (double-pay guard, already enforced in _send).
+    // Act conservatively for the CORPUS: the book was already debited in _send, so
+    // count the outflow against the rolling budget and start the cooldown to block
+    // an immediate double-request. But do NOT create a repayable loan or a completed
+    // grant for funds we can't confirm landed — record an auditable, clearly-marked
+    // ledger line instead, and never tell the requester "nothing was sent".
+    log.warn(`Disbursement to ${recipient} unconfirmed (${res.code}) — recorded conservatively, not retried.`);
+    rec.lastRequestAt = now; // start the cooldown (anti double-pay)
+    state.recordDisbursement(decision.amountBase, now); // treat as spent against the daily budget
+    state.noteDecision(decision.decision);
+    state.appendLedger({ ...ledgerBase, kind: decision.kind, amountBase: decision.amountBase.toString(), code: 'unconfirmed', unconfirmed: true });
+    state.save();
+    await reply(client, recipient, rateLimit, [
+      `⚠️ I couldn't get a network confirmation that your ${decision.kind} of ${client.fmt(decision.amountBase)} completed.`,
+      `The funds may well have arrived — please check your wallet in a minute.`,
+      `To rule out any double-payment I won't retry automatically. If nothing shows up,`,
+      `you can request again after your cooldown, or reply here and the owner will reconcile it. ${sig()}`,
+    ].join('\n'), { priority: true });
+    return { decision, unconfirmed: true, code: res.code };
   }
 
   const dry = res?.dryRun === true;
@@ -284,9 +296,11 @@ export async function applyIncomingRepayment(client, state, rateLimit, { transfe
   let refunded = 0n;
   if (leftoverBase > 0n) {
     const rr = await client.refund(pubkey, leftoverBase, `frani-treasury overpayment refund`);
-    if (rr && !rr.error && !rr.skipped) {
+    if (rr && !rr.error && !rr.ambiguous && !rr.skipped) {
       refunded = leftoverBase;
       state.recordRefund(leftoverBase);
+    } else if (rr?.ambiguous) {
+      log.warn(`Overpayment refund to ${recipient} unconfirmed (${rr.code}) — not asserting a completed refund.`);
     }
   }
   state.save();

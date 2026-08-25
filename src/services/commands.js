@@ -65,7 +65,7 @@ function fmtDur(ms) {
  */
 export async function treasuryStatusLines(client, state, now = Date.now()) {
   const s = state.stats;
-  const balanceBase = await client.spendableBase();
+  const balanceBase = await client.effectiveSpendableBase();
   const floorBase = client.toBase(config.treasury.minBalanceFloorWhole);
   const budgetBase = client.toBase(config.treasury.dailyBudgetWhole);
   const spentBase = state.disbursedInWindowBase(DAY_MS, now);
@@ -150,7 +150,8 @@ async function cmdHistory(client, state, rateLimit, dm) {
       else if (e.type === 'donation') lines.push(`   ${when}  donated ${client.fmt(BigInt(e.amountBase))}`);
       else {
         const tag = e.decision === 'reject' ? `declined (${e.code})` : `${e.decision} ${e.kind ?? ''} ${client.fmt(BigInt(e.amountBase ?? '0'))}`;
-        lines.push(`   ${when}  requested ${client.fmt(BigInt(e.requestedBase ?? '0'))} → ${tag}`);
+        const note = e.unconfirmed ? ' — unconfirmed, check your wallet' : '';
+        lines.push(`   ${when}  requested ${client.fmt(BigInt(e.requestedBase ?? '0'))} → ${tag}${note}`);
       }
     }
   }

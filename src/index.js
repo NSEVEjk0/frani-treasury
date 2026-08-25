@@ -49,6 +49,7 @@ async function printStatus(client) {
   const { State } = await import('./state.js');
   const { treasuryStatusLines } = await import('./services/commands.js');
   const state = State.load();
+  client.attachState(state);
   const lines = await treasuryStatusLines(client, state, Date.now());
   log.info('\n' + lines.join('\n'));
 }
@@ -62,6 +63,7 @@ async function printStatus(client) {
 async function runDemo(client) {
   const { State } = await import('./state.js');
   const state = State.load();
+  client.attachState(state);
   const now = Date.now();
   const decimals = client.coin.decimals;
 

@@ -39,6 +39,12 @@ import { toBaseUnits, toWholeString } from './money.js';
 
 const log = createLogger('sphere');
 
+// After an outbound send, the consumed tokens sit in `transferringAmount` and the
+// live confirmed balance reads ~0 until the change settles (seconds to ~90s under
+// load). For this window we trust the local book balance over the chain read and
+// refuse to reconcile — long enough to cover a slow settle plus wallet-api lag.
+const SEND_GUARD_MS = 180_000;
+
 // Re-export the money helpers so callers can import them from the client too.
 export { toBaseUnits, toWholeString };
 
@@ -250,6 +256,54 @@ export class SphereClient {
     return toWholeString(await this.spendableBase(), this.coin.decimals);
   }
 
+  /** Attach the persisted state so the client can keep the book balance. */
+  attachState(state) {
+    this._state = state;
+    return this;
+  }
+
+  /**
+   * The spendable corpus the treasury should act on — lag-free and safe.
+   *
+   * The chain read alone is unusable for gating disbursements: during a token's
+   * in-flight settle window ALL involved funds (the amount leaving AND the change
+   * returning) sit in `transferringAmount`, while `confirmedAmount` reads ~0. So
+   * we keep a local book: debit it the instant we attempt a send (in `_send`),
+   * and reconcile it back to the on-chain `confirmedAmount` whenever the wallet is
+   * quiescent (nothing transferring or unconfirmed) AND no send is within its
+   * settle guard. That reconcile is the anchor that heals any drift — including
+   * an ambiguous send that never actually left — so the book self-corrects to
+   * truth every time the wallet goes quiet, but never mid-settle.
+   */
+  async effectiveSpendableBase() {
+    const assets = await this.sphere.payments.assets(this.coin.coinId);
+    const a = assets.find((x) => x.coinId === this.coin.coinId) || {};
+    const confirmed = BigInt(a.confirmedAmount ?? '0');
+    const st = this._state;
+    if (!st) return confirmed; // no attached ledger (one-shot CLI) → best-effort chain read
+
+    const transferring = BigInt(a.transferringAmount ?? '0');
+    const unconfirmed = BigInt(a.unconfirmedAmount ?? '0');
+    const quiescent = transferring === 0n && unconfirmed === 0n;
+    const guardActive = this._sendGuardUntil != null && Date.now() < this._sendGuardUntil;
+
+    let book = st.getBookBase();
+    if (book == null) {
+      book = confirmed; // first-ever anchor to the chain
+      st.setBookBase(book);
+      st.save();
+    } else if (quiescent && !guardActive && book !== confirmed) {
+      book = confirmed; // settled and no send in flight → the chain is the truth
+      st.setBookBase(book);
+      st.save();
+    }
+    return book;
+  }
+
+  async effectiveSpendableWhole() {
+    return toWholeString(await this.effectiveSpendableBase(), this.coin.decimals);
+  }
+
   toBase(whole) {
     return toBaseUnits(whole, this.coin.decimals);
   }
@@ -302,6 +356,10 @@ export class SphereClient {
     const result = await this.sphere.payments.mint(this.coin.coinId, base);
     if (result?.success) {
       log.info(`Minted ${whole} ${this.coin.symbol} (token ${String(result.tokenId).slice(0, 12)}…).`);
+      if (this._state) {
+        this._state.adjustBook(base); // credit the corpus book immediately
+        this._state.save();
+      }
     } else {
       log.error(`Mint failed: ${result?.error ?? 'unknown error'}`);
     }
@@ -329,13 +387,24 @@ export class SphereClient {
    *   • re-checks the reserve floor against a fresh balance read
    *   • never blindly retries an unconfirmed certification (double-pay guard)
    */
+  /**
+   * Low-level guarded send. Independent of the policy engine, this ALWAYS:
+   *   • refuses non-positive amounts
+   *   • honours DRY_RUN
+   *   • re-checks the reserve floor against the lag-free book balance
+   *   • debits the book the instant it commits to an attempt (so a second request
+   *     during the settle window sees the true remaining corpus, not a stale ~0)
+   *   • never blindly retries an unconfirmed/uncertified send (double-pay guard):
+   *     any non-clean outcome is reported as `ambiguous` — the burn may already be
+   *     certified (funds gone) or may have failed, and we must not resend either way
+   */
   async _send(recipient, base, memo) {
     if (base <= 0n) return { skipped: 'non-positive amount' };
     if (config.safety.dryRun) {
       log.warn(`[DRY_RUN] Would send ${this.toWhole(base)} ${this.coin.symbol} to ${recipient}.`);
       return { dryRun: true };
     }
-    const balance = await this.spendableBase();
+    const balance = await this.effectiveSpendableBase();
     const floor = this.toBase(config.treasury.minBalanceFloorWhole);
     if (balance - base < floor) {
       log.warn(
@@ -344,6 +413,14 @@ export class SphereClient {
       );
       return { skipped: 'reserve-floor' };
     }
+    // Committed to attempt: debit the book NOW and open the settle guard, so any
+    // near-simultaneous request sees the reduced corpus. If the send turns out to
+    // have failed, the next quiescent reconcile heals the book back up.
+    this._sendGuardUntil = Date.now() + SEND_GUARD_MS;
+    if (this._state) {
+      this._state.adjustBook(-base);
+      this._state.save();
+    }
     try {
       const result = await this.sphere.payments.send({
         recipient,
@@ -351,17 +428,20 @@ export class SphereClient {
         coinId: this.coin.coinId,
         memo,
       });
-      if (result?.error) log.error(`Send error: ${result.error}`);
-      else log.info(`Sent ${this.toWhole(base)} ${this.coin.symbol} to ${recipient} (${result.status}).`);
+      if (result?.error) {
+        log.error(`Send returned an error to ${recipient}: ${result.error}`);
+        return { ambiguous: true, code: 'send-error', message: String(result.error) };
+      }
+      log.info(`Sent ${this.toWhole(base)} ${this.coin.symbol} to ${recipient} (${result?.status ?? 'ok'}).`);
       return result;
     } catch (err) {
-      // Never blindly re-send on an unconfirmed certification (double-pay risk).
-      if (isSphereError(err) && err.code === 'CERTIFICATION_UNCONFIRMED') {
-        log.warn(`Send certification unconfirmed to ${recipient} — NOT retrying (double-pay guard).`);
-        return { unconfirmed: true };
-      }
-      log.error(`Send failed to ${recipient}: ${fmtErr(err)}`);
-      return { error: fmtErr(err) };
+      // The send threw AFTER we submitted the intent. It may already be certified
+      // (e.g. CHECKPOINT_PERSIST_FAILED: "split burn certified …") or may have
+      // failed outright — we cannot tell, so we NEVER auto-retry (double-pay guard)
+      // and report it as ambiguous for the caller to record conservatively.
+      const code = isSphereError(err) ? err.code : 'send-threw';
+      log.warn(`Send to ${recipient} not confirmed (${code}) — NOT retrying (double-pay guard): ${fmtErr(err)}`);
+      return { ambiguous: true, code, message: fmtErr(err) };
     }
   }
 
