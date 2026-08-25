@@ -1,0 +1,35 @@
+{
+  "name": "frani-treasury",
+  "version": "1.0.0",
+  "description": "frani-treasury — an autonomous, rules-based treasury agent on the Unicity testnet2 network. Evaluates funding requests over encrypted DM and disburses UCT as either no-repayment seed grants or tracked repayable micro-loans, under strict transparent outflow controls. Owner/creator: Itachi. Made by CRYPTFRANI.",
+  "type": "module",
+  "main": "src/index.js",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "whoami": "node src/index.js --whoami",
+    "doctor": "node src/index.js --doctor",
+    "status": "node src/index.js --status",
+    "mint": "node src/index.js --mint",
+    "demo": "node src/index.js --demo"
+  },
+  "keywords": [
+    "unicity",
+    "testnet2",
+    "sphere-sdk",
+    "autonomous-agent",
+    "treasury",
+    "grants",
+    "micro-loans",
+    "uct",
+    "cryptfrani"
+  ],
+  "author": "Itachi (CRYPTFRANI)",
+  "license": "MIT",
+  "dependencies": {
+    "@unicitylabs/sphere-sdk": "^0.14.10",
+    "ws": "^8.21.3"
+  }
+}

@@ -1,0 +1,21 @@
+# ── Dependencies ─────────────────────────────────────────────
+node_modules/
+
+# ── SECRETS — NEVER COMMIT ───────────────────────────────────
+# wallet-data/ holds the BIP39 mnemonic and private keys that control
+# @frani-treasury and ALL of its funds. Committing it = irreversibly
+# leaking the treasury wallet. It also holds state.json (the live grant/
+# loan ledger). Keep the entire directory out of git.
+wallet-data/
+.env
+.env.local
+.env.*.local
+
+# ── Logs ─────────────────────────────────────────────────────
+*.log
+
+# ── Scratch / local test scripts ─────────────────────────────
+test-*.mjs
+
+# ── Tooling / OS ─────────────────────────────────────────────
+.DS_Store
