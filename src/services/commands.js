@@ -36,7 +36,7 @@ import { createLogger } from '../logger.js';
 import { normalizeKey } from '../state.js';
 import reputation from '../reputation.js';
 import treasury from '../treasury.js';
-import { reply, recipientOfDm, sig } from '../reply.js';
+import { reply, recipientFromSender, recipientOfDm, sig } from '../reply.js';
 
 const log = createLogger('commands');
 
@@ -307,10 +307,34 @@ async function cmdForgive(client, state, rateLimit, dm, parts) {
     await reply(client, recipientOfDm(dm), rateLimit, `Usage: \`forgive <loanId>\` — no active loan found for that id. ${sig()}`, { priority: true });
     return;
   }
-  if (!state.hasOverdueLoan(loan.requester)) state.unfreeze(loan.requester);
+  // Read the freeze before forgiving clears it. `reputation.isFrozen` also reports
+  // true for a blacklist, and `unfreeze` deliberately does not lift one — so look at
+  // frozenUntil directly, or we would promise access a blacklisted account won't get.
+  const recBefore = state.getRequester(loan.requester);
+  const wasFrozen = (recBefore?.frozenUntil ?? 0) > Date.now() && recBefore?.blacklisted !== true;
+  const thawed = !state.hasOverdueLoan(loan.requester);
+  if (thawed) state.unfreeze(loan.requester);
   state.save();
   log.warn(`Owner forgave loan ${id} (${client.fmt(BigInt(loan.principalBase))}).`);
   await reply(client, recipientOfDm(dm), rateLimit, `✅ Loan ${String(id).slice(0, 8)} forgiven and written off. ${sig()}`, { priority: true });
+  // Tell the BORROWER too. Their debt is gone and, usually, their freeze with it —
+  // a terminal change in their standing that only the owner used to hear about. Left
+  // silent, someone frozen out over an overdue loan keeps believing they are frozen
+  // and stops asking. Best-effort: forgiveness has already been recorded and told to
+  // the owner, so a delivery failure here must not fail the command.
+  const borrower = recipientFromSender(loan.requester, loan.requesterNametag);
+  try {
+    await reply(client, borrower, rateLimit, [
+      `✅ Good news — your micro-loan of ${client.fmt(BigInt(loan.principalBase))} has been forgiven and written off by the treasury.`,
+      `Nothing is outstanding and you owe nothing further.`,
+      wasFrozen && thawed
+        ? `Your account is unfrozen: \`request <amount> <reason>\` works again.`
+        : `\`status\` to see where you stand.`,
+      sig(),
+    ].join('\n'), { priority: true });
+  } catch (err) {
+    log.warn(`Could not notify ${loan.requesterNametag ?? loan.requester?.slice(0, 10)} that loan ${id} was forgiven: ${err?.message ?? err}`);
+  }
 }
 
 async function cmdBlacklist(client, state, rateLimit, dm, parts) {
