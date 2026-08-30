@@ -29,7 +29,7 @@
   "author": "Itachi (CRYPTFRANI)",
   "license": "MIT",
   "dependencies": {
-    "@unicitylabs/sphere-sdk": "^0.14.10",
+    "@unicitylabs/sphere-sdk": "^0.15.0",
     "ws": "^8.21.3"
   }
 }
