@@ -349,10 +349,11 @@ same request twice.
 npm test
 ```
 
-Three offline suites — no network, no wallet, no funds:
+Four offline suites — no network, no wallet, no funds:
 
 | Suite | What it pins |
 |---|---|
+| `test-balance-outage-unit.mjs` | a wallet-api outage is never read as a zero corpus — 19 assertions, 6 of which fail without the fix |
 | `test-forgive-notify-unit.mjs` | forgiving a loan actually tells the borrower — 23 assertions, 7 of which fail without the fix |
 | `test-policy.mjs` | 12/12 policy checks: budgets, per-account caps, reputation, and the hard rails that stop self-drain |
 | `test-verify.mjs` | two real settlement signatures verify against the published pubkeys, so a counterparty need not trust the desk |

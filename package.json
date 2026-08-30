@@ -14,7 +14,7 @@
     "status": "node src/index.js --status",
     "mint": "node src/index.js --mint",
     "demo": "node src/index.js --demo",
-    "test": "node test-forgive-notify-unit.mjs && node test-policy.mjs && node test-verify.mjs"
+    "test": "node test-balance-outage-unit.mjs && node test-forgive-notify-unit.mjs && node test-policy.mjs && node test-verify.mjs"
   },
   "keywords": [
     "unicity",
