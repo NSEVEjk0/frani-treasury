@@ -293,14 +293,39 @@ export async function applyIncomingRepayment(client, state, rateLimit, { transfe
   });
 
   // Refund any surplus beyond all debt (recorded only once the refund is accepted).
+  // Three outcomes, three different things to say. `client.refund` RESOLVES with
+  // `{error}` rather than throwing, so a caller that only checked for an exception
+  // would promise a refund that never left — and an overpayment nobody mentions is
+  // the difference quietly kept. The surplus is therefore either refunded and said
+  // so, or NOT refunded and said so, and is written to the ledger as owed either way.
   let refunded = 0n;
+  let surplusOwed = 0n;
+  let surplusUnconfirmed = 0n;
   if (leftoverBase > 0n) {
     const rr = await client.refund(pubkey, leftoverBase, `frani-treasury overpayment refund`);
     if (rr && !rr.error && !rr.ambiguous && !rr.skipped) {
       refunded = leftoverBase;
       state.recordRefund(leftoverBase);
     } else if (rr?.ambiguous) {
+      // Indeterminate: the burn may already be certified. Never retried, never claimed.
+      surplusUnconfirmed = leftoverBase;
       log.warn(`Overpayment refund to ${recipient} unconfirmed (${rr.code}) — not asserting a completed refund.`);
+    } else {
+      // Nothing moved. Say so, and keep the debt to them on the books.
+      surplusOwed = leftoverBase;
+      log.warn(`Overpayment refund to ${recipient} did not go out (${rr?.error ?? rr?.skipped ?? 'unknown'}) — recorded as owed.`);
+    }
+    if (surplusOwed > 0n || surplusUnconfirmed > 0n) {
+      state.appendLedger({
+        at: now,
+        id: randomUUID(),
+        type: 'refund-owed',
+        requester: pubkey,
+        nametag,
+        amountBase: leftoverBase.toString(),
+        decision: 'pending',
+        code: surplusUnconfirmed > 0n ? 'refund-unconfirmed' : 'refund-failed',
+      });
     }
   }
   state.save();
@@ -316,9 +341,15 @@ export async function applyIncomingRepayment(client, state, rateLimit, { transfe
   }
   lines.push(remainingDebt > 0n ? `Remaining outstanding: ${client.fmt(remainingDebt)}.` : `You're all settled — no outstanding debt. 🎉`);
   if (refunded > 0n) lines.push(`Overpayment of ${client.fmt(refunded)} refunded to you.`);
+  if (surplusOwed > 0n) {
+    lines.push(`⚠️ You overpaid by ${client.fmt(surplusOwed)} and I could NOT send it back just now — the transfer did not go out, so that amount is still mine to return, not yours to chase. It is on my books as owed to you; reply \`status\` to see it.`);
+  }
+  if (surplusUnconfirmed > 0n) {
+    lines.push(`⚠️ You overpaid by ${client.fmt(surplusUnconfirmed)}. I attempted the refund but could not confirm it either way, so I will not retry it and I will not claim it succeeded — please check your wallet, and tell me if it never arrived.`);
+  }
   lines.push(`Standing: ${prog.label}${prog.nextTier ? ` · ${prog.toNextOnTime} on-time to ${reputation.describeTier(prog.nextTier)}` : ' · top tier'}. ${sig()}`);
   await reply(client, recipient, rateLimit, lines.join('\n'), { priority: true });
-  return { appliedBase, cleared, refunded };
+  return { appliedBase, cleared, refunded, surplusOwed, surplusUnconfirmed };
 }
 
 /**

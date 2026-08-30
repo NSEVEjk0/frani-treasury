@@ -173,8 +173,80 @@ console.log('\n[4] forgiving an unknown loan id notifies nobody but the owner');
   ok(/usage/i.test(toOwner(client)[0]?.content ?? ''), 'the owner gets a usage hint');
 }
 
+
+// ── 5) the same class, on the other side of the ledger: an overpayment that
+//      could NOT be returned. Forgiveness is a terminal change in the
+//      borrower's favour; a stuck refund is one in the treasury's. Both are
+//      silent by default and both have to be said out loud.
+console.log('\n[5] an overpayment refund that did not go out is never reported as refunded');
+{
+  const { applyIncomingRepayment } = await import('./src/treasury.js');
+
+  /** A client whose `refund` behaves the three ways the SDK actually behaves. */
+  const refundClient = (mode) => ({
+    ...makeClient(),
+    dms: [],
+    refunds: [],
+    async refund(to, base, memo) {
+      this.refunds.push({ to, base: String(base), memo });
+      if (mode === 'ok') return { success: true };
+      if (mode === 'error') return { error: 'wallet-api unreachable' }; // RESOLVES, does not throw
+      return { ambiguous: true, code: 'CERTIFICATION_UNCONFIRMED' };
+    },
+  });
+
+  const overpay = async (mode) => {
+    const client = refundClient(mode);
+    const { state } = stateWithLoan();
+    state.data.ledger.length = 0; // each mode starts from a clean book
+    const rl = new RateLimiter();
+    const owed = state.outstandingDebtBase(normalizeKey(BORROWER));
+    const surplus = 10n ** DEC / 2n; // 0.5 UCT
+    const out = await applyIncomingRepayment(client, state, rl, {
+      transfer: { id: 't-1', senderPubkey: BORROWER, senderNametag: 'borrower-demo' },
+      amountBase: owed + surplus,
+    });
+    const said = toBorrower(client).map((m) => m.content).join('\n');
+    const owedLines = state.data.ledger.filter((l) => l.type === 'refund-owed');
+    return { client, state, out, said, owedLines, surplus };
+  };
+
+  // (a) it went out → say so, and only then
+  {
+    const { out, said, owedLines, surplus } = await overpay('ok');
+    ok(out.refunded === surplus, 'a successful refund is recorded as refunded');
+    ok(/refunded to you/i.test(said), 'and the borrower is told it came back');
+    ok(owedLines.length === 0, 'nothing is booked as owed');
+  }
+
+  // (b) it did NOT go out → the money is still the treasury's to return
+  {
+    const { client, out, said, owedLines, surplus } = await overpay('error');
+    ok(client.refunds.length === 1, 'the refund was attempted once');
+    ok(out.refunded === 0n, 'nothing is recorded as refunded');
+    ok(out.surplusOwed === surplus, 'the surplus is carried as owed');
+    ok(!/refunded to you/i.test(said), 'the borrower is NOT told it came back');
+    ok(/could not send it back/i.test(said), 'the borrower IS told it did not');
+    ok(/overpaid by 0\.5 UCT/.test(said), 'with the exact amount, not a vague apology');
+    ok(owedLines.length === 1 && owedLines[0].code === 'refund-failed',
+      'and it is on the books as refund-owed/refund-failed, not absorbed in silence');
+  }
+
+  // (c) indeterminate → a third answer, never retried, never claimed
+  {
+    const { client, out, said, owedLines, surplus } = await overpay('ambiguous');
+    ok(client.refunds.length === 1, 'an unconfirmed refund is attempted exactly once — never retried');
+    ok(out.refunded === 0n, 'it is not claimed as refunded');
+    ok(out.surplusUnconfirmed === surplus, 'it is not claimed as failed either');
+    ok(/could not confirm/i.test(said), 'the borrower is told it is unconfirmed');
+    ok(/check your wallet/i.test(said), 'and told what to do about it');
+    ok(owedLines.length === 1 && owedLines[0].code === 'refund-unconfirmed',
+      'the ledger distinguishes unconfirmed from failed');
+  }
+}
+
 console.log(`\n  ${passed} passed, ${failed} failed`);
 console.log(failed === 0
-  ? '  ✅ ALL PASS — forgiveness reaches the person it benefits.'
+  ? '  ✅ ALL PASS — a terminal change in the ledger always reaches the counterparty.'
   : '  ❌ FAILURES — a terminal change in standing is still silent.');
 process.exit(failed === 0 ? 0 : 1);

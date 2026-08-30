@@ -1,347 +1,288 @@
 # frani-treasury
 
-**An autonomous, rules-based UCT treasury on the Unicity testnet2 network.**
+### Every "no" this agent gives you comes with its reasons, in order.
 
-**Track:** Autonomous agents — treasury, grants and lending
-**Agentic:** Yes — it evaluates each request against published policy and disburses on its own, with no human in the loop
-**Runs on AstridOS:** No — a Node.js daemon under `systemd` on Linux
-**Status:** Live on testnet2 as `@frani-treasury`, holding 250 UCT with funding OPEN. Verified end-to-end on-network: 2 grants and 1 loan disbursed for real UCT, the loan repaid in full (0 outstanding), plus 1 partial fund and 1 policy rejection — the full request → approve → disburse → repay lifecycle, and the decline path too.
-**SDK:** `@unicitylabs/sphere-sdk` ^0.15.0 (`state-transition-sdk` 3.x)
+```
+  decision REJECT · code overdue · amount 0 UCT
+    ✓ enabled              disbursement enabled
+    ✓ valid-amount         requested=1 UCT
+    ✗ has-overdue          overdue loan outstanding
+```
 
-`frani-treasury` owns and manages a UCT wallet and funds other agents and users
-on request — completely autonomously, under a strict, transparent, published set
-of rules. You ask for funding over an encrypted direct message; the treasury
-evaluates the request against its policy (balance, daily budget, per-account
-limits, your reputation, and hard safety rails), then approves, partially funds,
-or declines — and, when it approves, actually sends you the UCT. Everything it
-does is bounded so that it can never drain itself: it is an *earn-and-lend*
-treasury with tightly controlled outflow, not a faucet.
+That is not a log line written for an operator. It is what the requester gets, and
+it is produced by a function that imports no SDK, no config, no clock and no state
+— `policy.evaluate(request, context)`, given numbers, returning a decision and the
+ordered list of gates it walked to get there. The trace stops at the failure because
+the engine short-circuits there: nothing after `has-overdue` was consulted, so
+nothing after it is shown.
 
-> **Made by CRYPTFRANI · Owner / Creator: Itachi**
-
----
-
-## Live identity
+`frani-treasury` lends and grants UCT on Unicity testnet2 to any identity that asks
+for it, under published rules, with no human approving anything. The interesting part
+is not that it sends money. It is that the reason it sent — or didn't — is a value
+you can hold in your hand.
 
 | | |
 |---|---|
-| **Nametag** | `@frani-treasury` |
+| **Submission track** | **Autonomous agents** — treasury, grants and lending |
+| **Agentic** | Yes. It evaluates, decides, disburses, sweeps for overdue loans, freezes and unfreezes accounts and promotes reputations entirely on its own. |
+| **Runs on AstridOS** | No — a Node.js daemon under `systemd` on Linux |
+| **Live on** | Unicity **testnet2** as `@frani-treasury`, funding **OPEN**, corpus 250 UCT |
 | **Address** | `DIRECT://000043589af1ee69a89fc49ef54326d87b4477dd2d50c7a67bf60149212b42aa529381243fc1` |
 | **Chain pubkey** | `02ba06382aaab28c9e7b2cfcea86ff48a0ada5fecd2fe88ca0140eba832ff09209` |
-| **Network** | Unicity **testnet2** |
-| **Coin** | UCT (18 decimals) |
-
-To use it, just DM `@frani-treasury` from any Unicity identity:
-
-```
-request 1 gas for testing my agent
-```
-
-Small asks (≤ 1 UCT) come back as an instant, no-repayment **seed grant**.
-Larger asks become a **7-day repayable micro-loan** that builds your on-network
-reputation. Send `help` at any time for the full command list, or `terms` for
-the rules in full.
+| **SDK** | `@unicitylabs/sphere-sdk` ^0.15.0 (`state-transition-sdk` 3.x) |
+| **Verified on-network** | 2 grants and 1 loan disbursed for real UCT, the loan repaid in full (0 outstanding), plus 1 partial fund and 1 policy rejection — the approve → disburse → repay lifecycle *and* the decline path |
+| **Owner / Creator** | Itachi · Made by **CRYPTFRANI** |
 
 ---
 
-## How it works — the Tiered Treasury Model
+## The design decision worth reviewing: the brain has no hands
 
-The treasury runs a single, published economic model. Every requester sees the
-same rules, and every decision is explainable down to the individual check that
-bound it.
+`src/policy.js` is 188 lines and it cannot do anything. It cannot read a balance,
+cannot look at the clock, cannot save state and cannot send UCT. Its only input is
+a plain object of BigInts and booleans; its only output is
+`{decision, kind, amountBase, code, reason, checks[]}`.
 
-### Tier 1 — Seed Grants (≤ 1 UCT)
+```js
+// src/policy.js — the entire import list
+import { bigMax } from './money.js';
+```
 
-Pure, no-repayment micro-grants for fast onboarding, developer gas, and instant
-testing. Run `request 1 <reason>` and, if the treasury is solvent and you're
-within your limits, the UCT arrives in a single step with **zero debt tracked**.
-Grants are available to *every* reputation tier, including brand-new accounts.
+Everything that touches the world lives outside it. `treasury.buildContext()`
+resolves the live balance, the rolling 24-hour spend, the requester's record and
+their tier into that flat numeric object. The daemon then *only* asks the pure
+function what to do.
 
-Seed grants are paused for an account while it carries an outstanding loan —
-clear the loan and instant grants unlock again.
+Three things follow from that split, and all three are why it is worth the
+indirection:
 
-### Tier 2 — Repayable Micro-Loans (> 1 UCT)
+1. **The decline is auditable by the person receiving it.** A monolithic handler
+   returns "no". This one returns which of eleven named gates closed, with the
+   two numbers that closed it. The requester is not asked to trust the agent's
+   summary of its own behaviour.
+2. **The money rails enforce the rules a second time, independently.** The
+   reserve floor is checked in `policy.js` and re-checked inside
+   `sphere-client._send()` against a freshly-read balance. A bug in the decision
+   logic cannot spend the reserve, because the layer that actually moves UCT does
+   not trust the layer that decided to.
+3. **The whole engine is testable with no wallet at all.** `test-policy.mjs`
+   drives all twelve gates offline, and `test-solvency-truth-unit.mjs` asserts the
+   purity *structurally* — that `policy.js` contains no `Date.now()`, no `await`,
+   and no import of the SDK, the config, the state or the clock, and that it
+   returns byte-identical output for a fixed context.
 
-Anything above the grant ceiling is booked automatically as a repayable
-micro-loan with a configurable return window (**7 days** by default). The
-treasury tracks your outstanding debt per identity. Repaying is simple: **just
-send the UCT back** to `@frani-treasury`. Incoming transfers are matched to your
-oldest outstanding loan first (FIFO), and any overpayment beyond your total debt
-is refunded to you automatically.
+---
 
-### Reputation ladder
+## Standing is derived, never asserted
 
-Standing is *earned*, never asserted — it's derived entirely from your on-network
-repayment behaviour:
+You do not tell this treasury who you are. It works out what you are worth from
+repayments it actually received.
 
 | Tier | Loan ceiling | Cooldown | Reached by |
 |---|---|---|---|
-| **Newbie** 🌱 | 2 UCT | 60 min | everyone starts here |
+| **Newbie** 🌱 | 2 UCT | 60 min | everyone starts here, including brand-new keys |
 | **Trusted** ⭐ | 5 UCT | 30 min | 2 on-time repayments |
 | **Partner** 👑 | 10 UCT | 15 min | 5 on-time repayments |
 
-- **On-time repayment** counts toward promotion, raising your single-loan
-  ceiling and shortening your cooldown between requests.
-- **Early repayment** (before the due date) grants a temporary boost to your
-  daily request limit.
-- **Overdue / default** freezes the account: new requests are refused until the
-  debt is settled, plus a cool-off period afterward.
+Repaying is not a command — you just **send the UCT back**. Incoming transfers are
+matched FIFO against your oldest outstanding loan. Early repayment (inside the
+`EARLY_BONUS_HOURS` window) buys a temporary lift to your daily request cap.
+Overdue freezes the account until settled, plus a cool-off after.
 
-Check your personal standing, credit headroom, and cooldown any time with
-`status`.
+**Two tiers of ask, split at one number:**
 
----
+- **≤ 1 UCT → seed grant.** No debt is tracked at all. This is the onboarding
+  path — developer gas, in one step, for an identity with no history. Grants are
+  paused while you carry a loan, and unlock again the moment you clear it.
+- **> 1 UCT → repayable micro-loan**, 7-day term by default, clamped to your
+  tier's ceiling. Ask for 4 UCT as a Newbie and you are approved for 2 **and told
+  that the ceiling was the binding constraint**, not fobbed off with "partially
+  approved".
 
-## Safety & outflow controls
-
-The treasury is deliberately conservative. It is built so that no single rule,
-and no interaction between rules, can push it below solvency. The money controls
-are enforced **twice** — once in the pure policy engine, and again independently
-in the wallet layer just before any UCT leaves — belt and suspenders:
-
-- **Reserve floor** — a hard, untouchable minimum spendable balance. The wallet
-  re-reads its live balance and refuses any send that would breach the floor,
-  regardless of what the policy decided.
-- **Rolling 24-hour budget** — a cap on total outflow across *all* requesters in
-  any 24-hour window.
-- **Max single disbursement** — an absolute ceiling on any one payout.
-- **Per-account limits** — a request cooldown and a rolling 24h request cap per
-  identity, both tuned by reputation tier.
-- **Credit headroom** — a borrower can never have more outstanding than their
-  tier's credit limit.
-- **Controlled outflow** — UCT leaves *only* through two guarded paths:
-  `disburse` (funding an approved request) and `refund` (returning a repayment
-  overpayment). Arbitrary payment requests sent to the treasury are declined
-  automatically; funding is always request-gated.
-- **Kill-switches** — `DISBURSE_ENABLED=false` freezes all outflow instantly
-  (evaluate-and-reply only, no redeploy needed); `DRY_RUN=true` logs every
-  intended action while touching nothing. The owner can also `pause`/`resume`
-  live over DM.
-- **Idempotency** — every inbound DM and transfer id is de-duplicated and
-  persisted before it's acted on, so a relay replay can never cause a double
-  payout.
-
-All amounts are handled as exact integer base units (BigInt, 18 decimals) — no
-floating-point drift in the money math.
+The demo below shows the same 4 UCT request declined-to-2 at the start and
+approved in full at the end, from the same treasury under the same rules, with
+nothing changed but two repayments that actually arrived.
 
 ---
 
-## Talking to the treasury
+## Where UCT can leave this wallet
 
-Everything happens over encrypted DM to `@frani-treasury`. A leading `!` is
-optional on every command (`!request` and `request` are equivalent).
+Exactly two doors, both request-gated, both guarded twice:
 
-### Public commands (anyone)
-
-| Command | What it does |
-|---|---|
-| `request <amount> [reason]` | Ask for funding. `request 1 gas for testing` |
-| `status` | Live treasury solvency **and** your personal standing & limits |
-| `history` | Your recent requests, decisions, and repayments |
-| `terms` | The full funding rules — tiers, ceilings, caps |
-| `repay` | How to repay a loan (and your current outstanding balance) |
-| `about` | What this service is |
-| `help` | The command list |
-
-`fund` / `req` are accepted aliases for `request`; `balance` for `status`;
-`rules` for `terms`.
-
-### Owner commands (protected)
-
-The owner surface is authenticated by sender pubkey and is **disabled entirely**
-unless `OWNER_PUBKEY` is configured. Non-owners who try an owner command simply
-get the "unknown command" reply — the admin surface is never revealed.
-
-| Command | What it does |
-|---|---|
-| `pause` / `resume` | Stop / restart all disbursement immediately |
-| `params` | Dump the active policy knobs |
-| `topup <amount>` | Mint more UCT into the corpus |
-| `forgive <loanId>` | Write off a loan and unfreeze the borrower |
-| `blacklist <pubkey> [on\|off]` | Block / unblock an account |
-| `unfreeze <pubkey>` | Lift a freeze early |
-| `admin` | The owner command list |
-
----
-
-## A worked example
-
-```
-you → @frani-treasury:   request 3 fund my test harness
-
-@frani-treasury → you:   ✅ Approved a loan of 3 UCT.
-                         Repay within 7 days by sending 3 UCT back to me.
-                         Repay on time to raise your reputation tier.
-                         — CRYPTFRANI
-
-        …later…
-
-you → @frani-treasury:   (send 3 UCT transfer)
-
-@frani-treasury → you:   💚 Received 3 UCT — that clears 1 loan, repaid on time.
-                         Reputation +1. Thanks for being reliable!
-                         — CRYPTFRANI
-```
-
-You can watch the whole decision path yourself, without moving any funds, by
-running the built-in demo (see [CLI modes](#cli-modes)) — it evaluates a spread
-of sample requests against the live corpus and prints the full ordered check
-trace for each.
-
----
-
-## Quick start
-
-**Requirements:** Node.js ≥ 22.
-
-```bash
-git clone https://github.com/NSEVEjk0/frani-treasury.git
-cd frani-treasury
-npm install
-
-# optional: copy and edit the config (every value has a safe default)
-cp .env.example .env
-
-# sanity-check identity, connectivity, and config
-npm run doctor
-
-# start the autonomous treasury daemon
-npm start
-```
-
-On first run the agent generates a BIP39 identity, registers its nametag, and
-performs a **one-time capped self-mint** to seed the corpus (there is no faucet
-on testnet2). The recovery phrase is printed **once** and saved to
-`wallet-data/mnemonic.txt` — back it up offline and never commit it (it controls
-the wallet and all of its funds; `wallet-data/` is gitignored for exactly this
-reason).
-
----
-
-## Configuration
-
-All settings are environment variables, optionally loaded from a local `.env`
-file. **Every value has a safe, conservative default**, so an empty or absent
-`.env` runs a valid, timid testnet2 treasury out of the box. See
-[`.env.example`](.env.example) for the fully annotated list; the most important
-knobs:
-
-| Variable | Default | Meaning |
+| Path | Triggered by | Guard |
 |---|---|---|
-| `AGENT_NAME` | `frani-treasury` | The nametag to claim (without `@`) |
-| `UNICITY_NETWORK` | `testnet2` | Network to run against |
-| `OWNER_PUBKEY` | *(empty)* | Chain pubkey allowed to run owner commands. Empty = admin disabled |
-| `GRANT_MAX_UCT` | `1` | Tier-1 boundary: ≤ this is a no-repayment grant |
-| `LOAN_TERM_DAYS` | `7` | Repayment window for Tier-2 loans |
-| `MAX_SINGLE_UCT` | `10` | Absolute hard ceiling on any single disbursement |
-| `DAILY_BUDGET_UCT` | `25` | Rolling 24h outflow budget across all requesters |
-| `MIN_BALANCE_FLOOR_UCT` | `25` | Untouchable reserve — never spent below this |
-| `MAX_REQUESTS_PER_24H` | `5` | Per-account request cap over rolling 24h |
-| `DISBURSE_ENABLED` | `true` | Master outflow switch (false = evaluate & reply only) |
-| `DRY_RUN` | `false` | Observe-only: log intended actions, touch nothing |
-| `SELF_MINT_AMOUNT` | `250` | One-time bootstrap mint to seed the corpus |
+| `disburse` | an **approved** decision on a `request` DM | reserve floor, 24h budget, per-request ceiling, hourly disbursement cap, `DISBURSE_ENABLED` |
+| `refund` | a repayment that **overshot** your total debt | the same floor and caps |
 
-Reputation-ladder thresholds, cooldowns, freeze durations, rate caps, sweep
-cadence, and the public advert are all configurable too — see `.env.example`.
+There is no third door. An unsolicited `payment_request` sent *to* the treasury is
+declined automatically — funding is only ever pulled by a request the treasury
+itself evaluated, never pushed by whoever asks nicely. `pause`/`resume` over DM
+freezes both doors live, without a redeploy.
+
+### The honesty rule on the refund door
+
+`client.refund()` **resolves** with `{error}` when the wallet-api is unreachable —
+it does not throw. So an overpayment has three possible outcomes and the treasury
+says a different thing for each:
+
+- **it went out** → "Overpayment of X refunded to you."
+- **it did not go out** → it says so, in as many words, names the amount, and books
+  the surplus in the ledger as `refund-owed`. The money is still the treasury's to
+  return, not yours to chase.
+- **it could not be confirmed either way** → never retried (the burn may already be
+  certified) and never claimed. You are told to check your wallet.
+
+Silence is not one of the three answers. An overpayment nobody mentions is the
+difference quietly kept, and eight assertions in `test-forgive-notify-unit.mjs`
+fail if that branch is removed.
 
 ---
 
-## CLI modes
-
-The agent doubles as its own inspection tool:
+## See it decide, in one command
 
 ```bash
-node src/index.js            # start the autonomous treasury daemon (default)
-node src/index.js --doctor   # connectivity / config self-check, then exit
-node src/index.js --whoami   # print identity + balance, then exit
-node src/index.js --status   # print the live treasury status report, then exit
-node src/index.js --mint 50  # capped self-mint into the corpus, then exit
-node src/index.js --demo     # run sample requests through the policy engine, then exit
+npm install
+npm run demo
 ```
 
-`--demo` is the quickest way to *see* the decision engine work: it builds the
-real numeric context from the live balance and runs a spread of sample requests
-through the policy, printing each decision with its full ordered check trace — no
-funds move.
+`--demo` runs the real `policy.js`, the real reputation ladder, the real ledger and
+the real `treasury.js` lifecycle against a **fake wallet**. It opens no socket and
+no wallet file, so unlike `whoami` it is safe to run while the daemon is up. Every
+decision it prints was produced by the code the live agent runs, trace included.
+
+- **Happy path** — a new key takes a seed grant, then a loan clamped to its Newbie
+  ceiling, repays on time twice, is **promoted to Trusted**, and re-issues the exact
+  request that was clamped at the start. Approved in full this time.
+- **Failure path** — a second key borrows and goes quiet. The sweep marks the loan
+  overdue and freezes the account; the next request is **declined with the ordered
+  trace** stopping at `has-overdue`. Then they settle, slightly over, and the
+  refund fails — and the reply says so rather than promising money that never left.
+
+It closes by counting every outbound move and showing that each one was gated by a
+decision.
 
 ---
 
-## Running as a service (systemd)
+## Talking to it
 
-A unit file is included as [`frani-treasury.service`](frani-treasury.service).
-To install it:
+DM `@frani-treasury` on testnet2. A leading `!` is optional everywhere.
+
+```
+request <amount> [reason]   ask for funding — the only way money moves
+status                      treasury solvency + YOUR tier, headroom and cooldown
+history                     your requests, decisions and repayments
+terms                       the rules, in full
+repay                       how repayment works, and what you owe
+about · help
+```
+
+Aliases: `fund`/`req` → `request`, `balance` → `status`, `rules` → `terms`.
+
+Owner-only, authenticated by sender pubkey and **entirely absent** unless
+`OWNER_PUBKEY` is set (non-owners get "unknown command" — the surface is never
+revealed):
+
+```
+pause · resume · params · admin
+topup <amount> · forgive <loanId> · blacklist <pubkey> [on|off] · unfreeze <pubkey>
+```
+
+`forgive` is worth a note: writing off a loan is a terminal change in the
+*borrower's* favour, so the borrower is told, not just the owner. That was a real
+bug, and it is now pinned by a suite of its own.
+
+---
+
+## Running it
 
 ```bash
-sudo cp frani-treasury.service /etc/systemd/system/
-sudo systemctl daemon-reload
+npm install
+cp .env.example .env      # optional — every value has a safe, timid default
+
+npm run doctor            # connectivity + config self-check
+npm run whoami            # identity, address, balance
+npm run status            # the live treasury report
+npm run demo              # the offline decision walk-through (safe while running)
+npm start                 # the autonomous daemon
+
+npm test                  # three offline suites, 86 assertions
+```
+
+Node ≥ 22 (the SDK's live feed needs native `WebSocket`/`fetch`). First launch
+generates a BIP39 identity, claims the nametag, and performs a **one-time capped
+self-mint** to seed the corpus — testnet2 has no faucet. The phrase prints once and
+lands in `wallet-data/` (gitignored, 0600): back it up offline, set
+`WALLET_PASSWORD` to encrypt it at rest, delete the directory to start over.
+
+> Do not run `whoami`/`doctor`/`status` while the service is up — each boots a
+> second Sphere instance on the same wallet. Use `journalctl` or the DM `status`.
+> `npm run demo` is the exception: it never opens a connection.
+
+### As a service
+
+```ini
+# /etc/systemd/system/frani-treasury.service   (shipped as frani-treasury.service)
+[Service]
+WorkingDirectory=/root/frani-treasury
+ExecStart=/usr/bin/node --max-old-space-size=500 src/index.js
+Restart=always
+RestartSec=5
+KillSignal=SIGINT        # graceful: stop timers → persist state → close socket
+```
+
+```bash
+sudo cp frani-treasury.service /etc/systemd/system/ && sudo systemctl daemon-reload
 sudo systemctl enable --now frani-treasury
-```
-
-Then follow the logs:
-
-```bash
 journalctl -u frani-treasury -f
 ```
 
-`systemctl stop` / `restart` sends `SIGINT`, which triggers the agent's graceful
-shutdown: it stops its timers, persists state to disk, and closes the network
-connection cleanly rather than being hard-killed.
+### Configuration
+
+Every knob has a conservative default, so an absent `.env` still runs a valid,
+timid treasury. Full annotated list in [`.env.example`](.env.example); the ones
+that change what it will agree to:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `GRANT_MAX_UCT` | `1` | the tier-1/tier-2 boundary: ≤ this is a no-repayment grant |
+| `LOAN_TERM_DAYS` | `7` | repayment window before a loan goes overdue |
+| `MAX_SINGLE_UCT` | `10` | absolute ceiling on any one disbursement |
+| `DAILY_BUDGET_UCT` | `25` | rolling 24h outflow across *all* requesters |
+| `MIN_BALANCE_FLOOR_UCT` | `25` | untouchable reserve, enforced twice |
+| `MAX_REQUESTS_PER_24H` | `5` | per-account request cap |
+| `OWNER_PUBKEY` | *(empty)* | empty = the admin surface does not exist |
+| `DISBURSE_ENABLED` | `true` | `false` = evaluate and reply, move nothing |
+| `DRY_RUN` | `false` | log every intended action, touch nothing |
+
+Tier ceilings, cooldowns, promotion thresholds, freeze duration, rate caps and the
+sweep cadence are all configurable too.
 
 ---
 
-## Architecture
-
-The design keeps the *decision brain* completely separate from I/O, so the
-funding logic is deterministic and unit-testable in isolation.
+## Layout
 
 ```
 src/
-  index.js         Entrypoint: CLI modes + daemon bootstrap & graceful shutdown
-  agent.js         The long-running loop: events, polling, periodic sweep
-  policy.js        PURE decision engine — given a numeric context, returns a decision
-  treasury.js      Lifecycle: build context → evaluate → disburse → record → reply
-  reputation.js    The tier ladder (Newbie → Trusted → Partner), side-effect free
-  state.js         Crash-safe JSON persistence: requesters, loans, ledger, stats
-  money.js         Exact BigInt base-unit math (no floating point)
-  ratelimit.js     Rolling-window rate limiting (anti-spam + disbursement rate cap)
-  sphere-client.js Network layer: identity, wallet, and the guarded outflow paths
-  reply.js         Outbound DM helper (honours politeness caps)
-  config.js        Central, frozen configuration from env with safe defaults
-  logger.js        Small levelled structured logger
+  policy.js         THE PURE ENGINE — numbers in, decision + ordered trace out
+  reputation.js     the tier ladder, side-effect free
+  money.js          exact BigInt base-unit math (no float ever touches an amount)
+  treasury.js       buildContext → evaluate → disburse → record → reply; the sweep
+  state.js          crash-safe ledger: requesters, loans, activity, idempotency rings
+  sphere-client.js  SDK wiring + the two guarded outflow paths
+  agent.js          the loop: events, polling, the periodic loan sweep
+  demo.js           the offline walk-through (real engine, fake wallet)
+  config.js         frozen config from env, with defaults
+  reply.js          outbound DM helper (priority messages bypass politeness caps)
+  logger.js  ratelimit.js  index.js
   services/
-    commands.js    DM command router (public + owner surfaces)
-    delivery.js    Public advertising: standing service intent + optional heartbeat
+    commands.js     the DM router (public + owner surfaces)
+    delivery.js     the standing market service intent + optional heartbeat
+wallet-data/        mnemonic + state.json — GITIGNORED, 0700/0600
 ```
 
-`policy.js` imports nothing but the money helpers — no SDK, no clock, no config.
-`treasury.buildContext()` resolves configuration and reputation into a purely
-numeric context, which is the *only* input to `policy.evaluate()`. That's why the
-decision engine can be exercised end-to-end offline, and why every decision the
-live agent makes carries a complete, ordered trace of the checks that produced
-it.
-
-### State & persistence
-
-All durable state lives in `wallet-data/state.json`: per-requester reputation
-records, the loan ledger (active / repaid / overdue / forgiven), an activity
-ledger, seen-message and seen-transfer sets for idempotency, and lifetime stats.
-It is written atomically and reloaded on boot, so the treasury survives restarts
-without losing track of who owes what — and, crucially, without ever paying the
-same request twice.
-
----
-
-## Security notes
-
-- **Never commit `wallet-data/`.** It holds the BIP39 mnemonic and private keys
-  that control `@frani-treasury` and all of its funds, plus the live ledger. The
-  entire directory is gitignored.
-- **Never commit `.env`.** Also gitignored.
-- The owner admin surface is off unless `OWNER_PUBKEY` is set, and is
-  authenticated per-message by sender pubkey.
-- Set `WALLET_PASSWORD` to encrypt the mnemonic at rest on a shared host.
-
----
+State is written temp-file-plus-rename, so a crash mid-write cannot leave a
+truncated ledger. Every inbound DM id and transfer id is de-duplicated and
+persisted *before* it is acted on, so a relay replay can never fund the same
+request twice.
 
 ## Tests
 
@@ -349,25 +290,38 @@ same request twice.
 npm test
 ```
 
-Four offline suites — no network, no wallet, no funds:
+**86 assertions across three offline suites** — no network, no wallet, no funds.
 
 | Suite | What it pins |
 |---|---|
-| `test-balance-outage-unit.mjs` | a wallet-api outage is never read as a zero corpus — 21 assertions, 7 of which fail without the fix |
-| `test-forgive-notify-unit.mjs` | forgiving a loan actually tells the borrower — 23 assertions, 7 of which fail without the fix |
-| `test-policy.mjs` | 12/12 policy checks: budgets, per-account caps, reputation, and the hard rails that stop self-drain |
-| `test-verify.mjs` | two real settlement signatures verify against the published pubkeys, so a counterparty need not trust the desk |
+| `test-solvency-truth-unit.mjs` | 35 assertions, **9 of which fail without the fix**. `payments.assets()` resolves with an empty array when the wallet-api is unreachable rather than throwing, so at the call site an outage and an empty corpus are identical. Reading one as the other declines a solvent treasury with `RESERVE_FLOOR` and would fire a second bootstrap mint onto a funded wallet. It also asserts `policy.js`'s purity structurally, and that a genuinely empty corpus *does* still decline — silence and zero must reach different answers. |
+| `test-forgive-notify-unit.mjs` | 39 assertions. A terminal change in the ledger always reaches the counterparty: `forgive` tells the borrower (not just the owner) and lifts their freeze, and an overpayment refund is reported as refunded **only** when it went out — 8 assertions fail without that branch. |
+| `test-policy.mjs` | all 12 decision paths through the engine: budgets, caps, cooldown, credit headroom, reputation, blacklist, pause, and the reserve floor that stops self-drain. |
 
-The suites that move real UCT are deliberately **not** published: they embed an oracle
-API key and read a wallet mnemonic. `.gitignore` keeps `test-*.mjs` ignored by default and
-negates only the offline ones, so a new live test stays private unless someone opts it in.
+The suites that move real UCT are deliberately **not** published — they embed an
+oracle API key and read a mnemonic. `.gitignore` ignores `test-*.mjs` by default
+and negates only the three offline files, so a new live test stays private unless
+somebody opts it in.
 
 ---
 
-## License
+## Sibling agents (CRYPTFRANI fleet, testnet2)
+
+This is the fleet's **deliberately custodial** agent: a treasury that does not hold
+other people's money — it holds *its own* and gives some away, which is a very
+different risk. Its siblings take other positions on custody, and that is the point
+of running five.
+
+| Agent | Primitive |
+|---|---|
+| **@frani-treasury** | grants, loans, repayment reputation — this one |
+| **@frani-agent** | market discovery, standing watches (no send path exists at all) |
+| **@market-digest** | scheduled signed market reports |
+| **@frani-agora** | signed quote → invoice → settlement certificate |
+| **@frani-bounty** | bounty escrow, poster vs worker |
+
+---
+
+Runs on **testnet2** with test-only UCT. Not financial software; provided as-is.
 
 MIT © Itachi (CRYPTFRANI) — see [LICENSE](LICENSE).
-
----
-
-<p align="center"><sub>Made by <b>CRYPTFRANI</b> · Owner / Creator: <b>Itachi</b></sub></p>
