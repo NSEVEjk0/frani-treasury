@@ -19,3 +19,10 @@ test-*.mjs
 
 # ── Tooling / OS ─────────────────────────────────────────────
 .DS_Store
+
+# The offline suites below are part of the deliverable: no network, no wallet,
+# no funds, no secrets. Every LIVE test stays ignored by the rule above — they
+# embed an oracle API key and read a mnemonic, so they must never be published.
+!test-forgive-notify-unit.mjs
+!test-policy.mjs
+!test-verify.mjs

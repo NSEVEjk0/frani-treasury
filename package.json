@@ -13,7 +13,8 @@
     "doctor": "node src/index.js --doctor",
     "status": "node src/index.js --status",
     "mint": "node src/index.js --mint",
-    "demo": "node src/index.js --demo"
+    "demo": "node src/index.js --demo",
+    "test": "node test-forgive-notify-unit.mjs && node test-policy.mjs && node test-verify.mjs"
   },
   "keywords": [
     "unicity",

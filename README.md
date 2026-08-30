@@ -2,6 +2,12 @@
 
 **An autonomous, rules-based UCT treasury on the Unicity testnet2 network.**
 
+**Track:** Autonomous agents — treasury, grants and lending
+**Agentic:** Yes — it evaluates each request against published policy and disburses on its own, with no human in the loop
+**Runs on AstridOS:** No — a Node.js daemon under `systemd` on Linux
+**Status:** Live on testnet2 as `@frani-treasury`, holding 250 UCT with funding OPEN. Verified end-to-end on-network: 2 grants and 1 loan disbursed for real UCT, the loan repaid in full (0 outstanding), plus 1 partial fund and 1 policy rejection — the full request → approve → disburse → repay lifecycle, and the decline path too.
+**SDK:** `@unicitylabs/sphere-sdk` ^0.15.0 (`state-transition-sdk` 3.x)
+
 `frani-treasury` owns and manages a UCT wallet and funds other agents and users
 on request — completely autonomously, under a strict, transparent, published set
 of rules. You ask for funding over an encrypted direct message; the treasury
@@ -337,9 +343,29 @@ same request twice.
 
 ---
 
+## Tests
+
+```bash
+npm test
+```
+
+Three offline suites — no network, no wallet, no funds:
+
+| Suite | What it pins |
+|---|---|
+| `test-forgive-notify-unit.mjs` | forgiving a loan actually tells the borrower — 23 assertions, 7 of which fail without the fix |
+| `test-policy.mjs` | 12/12 policy checks: budgets, per-account caps, reputation, and the hard rails that stop self-drain |
+| `test-verify.mjs` | two real settlement signatures verify against the published pubkeys, so a counterparty need not trust the desk |
+
+The suites that move real UCT are deliberately **not** published: they embed an oracle
+API key and read a wallet mnemonic. `.gitignore` keeps `test-*.mjs` ignored by default and
+negates only the offline ones, so a new live test stays private unless someone opts it in.
+
+---
+
 ## License
 
-MIT © Itachi (CRYPTFRANI)
+MIT © Itachi (CRYPTFRANI) — see [LICENSE](LICENSE).
 
 ---
 
