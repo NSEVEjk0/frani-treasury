@@ -27,3 +27,6 @@ test-*.mjs
 !test-forgive-notify-unit.mjs
 !test-policy.mjs
 !test-verify.mjs
+
+# Local operator probes — read a mnemonic; never published.
+probe-*.mjs

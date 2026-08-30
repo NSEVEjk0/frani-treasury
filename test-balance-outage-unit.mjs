@@ -68,7 +68,7 @@ const funded = (whole, extra = {}) => [{
 }];
 const OTHER_COIN_ONLY = [{ coinId: 'some-other-coin', confirmedAmount: base(999).toString() }];
 
-const makeClient = (assetRows) => {
+const makeClient = (assetRows, created = false) => {
   const sphere = {
     payments: {
       rows: assetRows,
@@ -77,7 +77,7 @@ const makeClient = (assetRows) => {
     },
     identity: { chainPubkey: '02' + 'a'.repeat(64) },
   };
-  const c = new SphereClient(sphere, COIN, 'device-test', false);
+  const c = new SphereClient(sphere, COIN, 'device-test', created);
   return { client: c, sphere };
 };
 
@@ -185,6 +185,35 @@ console.log('\n[7] BOOTSTRAP MINT never fires on an unanswered balance');
   let threw = null;
   try { await client.bootstrapMintIfNeeded(); } catch (err) { threw = err?.message ?? String(err); }
   ok(threw === null, 'no mint was attempted during an outage', threw);
+}
+
+console.log('\n[8] a BRAND-NEW wallet may still bootstrap on an absent row');
+{
+  // The guard above must not break the documented testnet2 bootstrap. A wallet
+  // GENERATED THIS BOOT cannot hold funds, so there an absent row is definitively
+  // a zero rather than an ambiguous silence — `created` is the discriminator.
+  // This section needs a mint that COUNTS rather than throws, so it builds its own.
+  const counting = (created) => {
+    const sphere = {
+      payments: {
+        mints: 0,
+        async assets() { return OUTAGE; },
+        async mint() { this.mints += 1; return { success: true, tokenId: 'deadbeef' }; },
+      },
+      identity: { chainPubkey: '02' + 'a'.repeat(64) },
+    };
+    return { client: new SphereClient(sphere, COIN, 'device-test', created), sphere };
+  };
+
+  const fresh = counting(true);
+  await fresh.client.bootstrapMintIfNeeded();
+  ok(fresh.sphere.payments.mints === 1,
+    'a first-run treasury with no row yet still self-mints', fresh.sphere.payments.mints);
+
+  const existing = counting(false);
+  await existing.client.bootstrapMintIfNeeded();
+  ok(existing.sphere.payments.mints === 0,
+    'the same silence on a pre-existing treasury is still refused', existing.sphere.payments.mints);
 }
 
 console.log(`\n  ${passed} passed, ${failed} failed`);

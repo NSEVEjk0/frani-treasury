@@ -398,11 +398,22 @@ export class SphereClient {
   async bootstrapMintIfNeeded() {
     if (!config.safety.selfMintEnabled) return;
     const { present, row } = await this._coinRow();
-    if (!present) {
-      // An unanswered balance read is not a zero corpus. Minting here would
-      // bootstrap a second time on a treasury that may already be fully funded.
-      log.warn('Corpus unavailable (wallet-api gave no asset row) — skipping bootstrap mint.');
+    if (!present && !this.created) {
+      // An absent row is genuinely ambiguous: it is what an unreachable wallet-api
+      // looks like, AND what a wallet holding nothing at all looks like. assets()
+      // cannot tell them apart. But a wallet GENERATED THIS BOOT cannot hold
+      // funds, so there the absence is definitively a zero and the documented
+      // testnet2 self-mint bootstrap is safe. On a pre-existing wallet we refuse:
+      // re-minting onto funds we simply failed to read is the worse error.
+      log.warn(
+        'Corpus unavailable (wallet-api gave no asset row) on an existing treasury — ' +
+          'skipping bootstrap mint. If the corpus is genuinely empty, fund it ' +
+          'deliberately with the daemon stopped rather than guessing here.',
+      );
       return;
+    }
+    if (!present) {
+      log.info('Brand-new treasury with no asset row yet — treating as a genuine 0 corpus.');
     }
     const balance = BigInt(row.confirmedAmount ?? row.totalAmount ?? '0');
     const floor = this.toBase(config.treasury.minBalanceFloorWhole);
